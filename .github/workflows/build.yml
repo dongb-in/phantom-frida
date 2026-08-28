@@ -99,63 +99,70 @@ jobs:
       CUSTOM_PORT: ${{ inputs.port }}
       EXTENDED_PATCHES: ${{ inputs.extended }}
       FRIDA_VERSION: ${{ inputs.frida_version }}
-      NDK_ARCHIVE_URL: https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
+      NDK_ARCHIVE_SHA1: 87e2bb7e9be5d6a1c6cdf5ec40dd4e0c6d07c30b
+      NDK_ARCHIVE_URL: https://dl.google.com/android/repository/android-ndk-r29-linux.zip
       STRICT_WX: ${{ inputs.strict_wx }}
       TEMPORARY_FIXES: ${{ inputs.temp_fixes }}
 
     steps:
       - name: Check out builder
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.10"
+          python-version: "3.12"
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: "20"
+          node-version: "24.13.1"
 
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes build-essential curl git unzip python3-pip ninja-build
-          pip install lief requests
+          sudo apt-get install --yes build-essential curl git unzip
 
       - name: Restore immutable NDK
         id: ndk-cache
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: build/android-ndk-r25c
-          key: android-ndk-r25c-linux
+          path: build/android-ndk-r29
+          key: android-ndk-r29-linux-87e2bb7e9be5d6a1c6cdf5ec40dd4e0c6d07c30b
 
-      - name: Download NDK r25c
+      - name: Download and verify NDK
         if: steps.ndk-cache.outputs.cache-hit != 'true'
         run: |
-          archive="$RUNNER_TEMP/android-ndk-r25c-linux.zip"
+          archive="$RUNNER_TEMP/android-ndk-r29-linux.zip"
           mkdir -p build
           curl --fail --location --retry 3 --retry-all-errors \
             --output "$archive" "$NDK_ARCHIVE_URL"
+          printf '%s  %s\n' "$NDK_ARCHIVE_SHA1" "$archive" | sha1sum --check -
           unzip -q "$archive" -d build
+
+      - name: Validate NDK installation
+        run: |
+          grep -Fqx 'Pkg.Revision = 29.0.14206865' \
+            build/android-ndk-r29/source.properties
 
       - name: Patch build.py for Frida <= 16.3 Directory Compatibility
         run: |
           python3 - << 'EOF'
-          with open("build.py", "r", encoding="utf-8") as f:
-              content = f.read()
+          import os
 
-          # git clone 직후 subprojects 심볼릭 링크를 생성하도록 주입
+          with open("build.py", "r", encoding="utf-8") as f:
+              code = f.read()
+
+          # git clone 직후 subprojects 심볼릭 링크를 생성하는 로직 주입
           symlink_code = '''
-              # Fix directory layout for older Frida versions
               subprojects_dir = os.path.join(work_dir, "frida", "subprojects")
               os.makedirs(subprojects_dir, exist_ok=True)
               for sub in ["frida-core", "frida-gum", "frida-clr", "frida-node", "frida-python", "frida-qml", "frida-swift", "frida-tools"]:
@@ -165,14 +172,15 @@ jobs:
                       os.symlink(src, dst)
           '''
 
-          if "def clone_frida" in content:
-              content = content.replace('return True', symlink_code + '\n    return True')
-          elif "git clone" in content:
-              # Fallback injection
-              content = content.replace('print("[OK] Frida",', symlink_code + '\n    print("[OK] Frida",')
+          target_str = 'print(f"[OK] Frida {version} cloned")'
+          if target_str in code:
+              code = code.replace(target_str, symlink_code + '\n        ' + target_str)
+          else:
+              # Fallback: clone_frida 함수 리턴 전 주입
+              code = code.replace('return True', symlink_code + '\n    return True', 1)
 
           with open("build.py", "w", encoding="utf-8") as f:
-              f.write(content)
+              f.write(code)
           EOF
 
       - name: Apply patches and build
@@ -182,7 +190,7 @@ jobs:
             --version "$FRIDA_VERSION"
             --name "$CUSTOM_NAME"
             --arch "$ARCHITECTURES"
-            --ndk-path build/android-ndk-r25c
+            --ndk-path build/android-ndk-r29
             --verify
           )
 
@@ -206,14 +214,14 @@ jobs:
 
       - name: Verify release assets
         run: |
-          python3 -m json.tool output/build-info.json > /dev/null || true
+          python3 -m json.tool output/build-info.json > /dev/null
           cd output
-          sha256sum --check SHA256SUMS || true
+          sha256sum --check SHA256SUMS
 
       - name: Upload verified build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: phantom-frida-16.2.1-arm64
+          name: phantom-frida-build
           path: output/
           if-no-files-found: error
           retention-days: 30
